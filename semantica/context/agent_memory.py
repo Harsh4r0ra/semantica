@@ -1588,12 +1588,16 @@ class AgentMemory:
                     memory_ids.append(memory_id)
         return memory_ids
 
-    def batch_delete(self, memory_ids: List[str]) -> int:
+    def batch_delete(self, memory_ids: List[str], *, skip_vector: bool = False) -> int:
         """
         Batch delete.
 
         Args:
             memory_ids: List of memory IDs to delete
+            skip_vector: If True, skip each item's own vector-store cascade
+                (see ``delete_memory``). A caller that is already erasing these
+                ids' vectors itself passes this to avoid a redundant,
+                best-effort delete against the vector store.
 
         Returns:
             Number of memories deleted
@@ -1603,7 +1607,7 @@ class AgentMemory:
         """
         deleted = 0
         for memory_id in memory_ids:
-            if self.delete_memory(memory_id):
+            if self.delete_memory(memory_id, skip_vector=skip_vector):
                 deleted += 1
         return deleted
 

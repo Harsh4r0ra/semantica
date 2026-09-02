@@ -678,7 +678,7 @@ class TestSeparateVectorStoreHandling(unittest.TestCase):
     """
 
     def test_vector_store_false_disables_vector_leg_entirely(self):
-        """vector_store=False must disable the vector leg, not try memory.vector_store."""
+        """vector_store=False must disable the vector leg AND memory's own cascade (#1378)."""
         memory_store = _SelectiveDeleteStore()
         memory = _memory_with_embedding("customer-4471", memory_store)
 
@@ -689,8 +689,35 @@ class TestSeparateVectorStoreHandling(unittest.TestCase):
 
         # Vector leg should report not_configured, not attempt deletion
         self.assertEqual(receipt.stores["vectors"]["status"], STATUS_NOT_CONFIGURED)
-        # Memory's own cascade still runs, but coordinator doesn't track it
         self.assertTrue(receipt.complete)
+        # Memory's own internal vector cascade must be suppressed too, not just
+        # unreported: the embedding memory owns is left untouched, and the
+        # backend's delete method is never even called.
+        self.assertEqual(memory_store.attempts, [])
+        self.assertTrue(memory_store.live)
+
+    def test_vector_store_false_regression_refusing_backend_never_called(self):
+        """Regression for #1378: a refusing backend must not be called at all.
+
+        Reproduces the exact bug report -- a vector store whose delete_vectors()
+        always returns False (refuses) bound as memory.vector_store, with the
+        coordinator's own vector leg disabled via vector_store=False. Before the
+        fix, delete_memory()'s internal cascade would still call the refusing
+        store, catch the failure, log a warning, and return True regardless --
+        so receipt.complete read True while the embedding stayed live and the
+        backend had in fact been asked to delete it. Pinned here so the delete
+        method call count can't silently regress back to nonzero.
+        """
+        refusing_store = _SelectiveDeleteStore(refuse={"vec-0"})
+        memory = _memory_with_embedding("customer-4471", refusing_store)
+
+        receipt = ErasureCoordinator(
+            memory=memory, vector_store=False
+        ).erase_entity("customer-4471")
+
+        self.assertTrue(receipt.complete)
+        self.assertEqual(receipt.stores["vectors"]["status"], STATUS_NOT_CONFIGURED)
+        self.assertEqual(len(refusing_store.attempts), 0)  # delete_calls == 0
 
     def test_separate_vector_store_only_handles_coordinator_store(self):
         """When coordinator has a different vector_store, it only handles that one.

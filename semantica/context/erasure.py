@@ -150,6 +150,24 @@ class ErasureCoordinator:
         more than actually occurred. Erasing the graph last means a partial
         failure leaves the node present and the receipt incomplete, which is
         recoverable and honest.
+
+    Note:
+        An explicit ``vector_store=False`` also suppresses ``AgentMemory``'s
+        own internal vector cascade, not just the coordinator's leg (#1378).
+        ``AgentMemory.delete_memory()`` deletes an item's vectors best-effort:
+        it catches a vector-store failure, logs it, and still returns ``True``,
+        so without this a caller who opted out of the vector leg could still
+        have ``memory.vector_store`` mutated underneath them while the receipt
+        read ``vectors: not_configured``. ``vector_store=False`` is taken to
+        mean "no vector activity at all", so the coordinator passes
+        ``skip_vector=True`` through to ``memory.batch_delete()`` in that case,
+        and ``receipt.stores["vectors"]["status"]`` stays ``"not_configured"``
+        honestly -- the caller opted the vector store out entirely, rather than
+        the coordinator having erased it. This only applies when
+        ``vector_store=False`` was passed explicitly; when no vector store
+        exists anywhere (no ``memory`` was supplied, or ``memory`` has no
+        ``vector_store`` attribute), there is nothing to suppress and
+        ``memory.batch_delete()`` is called as before.
     """
 
     def __init__(
@@ -170,6 +188,12 @@ class ErasureCoordinator:
 
         self.graph = graph
         self.memory = memory
+        # Distinct from `self.vector_store is None`: that's also true when no
+        # vector store exists anywhere (no memory, or memory with no
+        # vector_store attribute), where there is nothing to suppress and
+        # forcing skip_vector onto a duck-typed memory would break callers
+        # whose batch_delete() doesn't accept that kwarg.
+        self._vector_leg_disabled = vector_store is False
         if vector_store is False:
             self.vector_store: Optional[Any] = None
         elif vector_store is not None:
@@ -454,7 +478,10 @@ class ErasureCoordinator:
                         "detail": "memory items carry no 'memory_id'",
                     }
 
-                removed = self.memory.batch_delete(memory_ids)
+                if self._vector_leg_disabled:
+                    removed = self.memory.batch_delete(memory_ids, skip_vector=True)
+                else:
+                    removed = self.memory.batch_delete(memory_ids)
                 deleted += removed
                 if removed == 0:
                     # No progress: another page would return the same items.
