@@ -34,6 +34,7 @@ Example:
     'unsupported'
 """
 
+import inspect
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
@@ -448,6 +449,20 @@ class ErasureCoordinator:
             return {"status": STATUS_NOT_CONFIGURED}
 
         deleted = 0
+        skip_vector = self._vector_leg_disabled and _accepts_skip_vector(
+            self.memory.batch_delete
+        )
+        if self._vector_leg_disabled and not skip_vector:
+            # The class docstring only requires find_by_entity/batch_delete; a
+            # duck-typed adapter is not required to support skip_vector. Falling
+            # back to the plain call keeps the memory leg working -- the
+            # adapter's own cascade (if it has one) just can't be suppressed.
+            self.logger.warning(
+                "Memory adapter %r has no skip_vector support; its own vector "
+                "cascade (if any) could not be suppressed for %r",
+                type(self.memory).__name__,
+                entity_id,
+            )
         try:
             # Sweep in pages until dry rather than passing one large limit:
             # ``find_by_entity`` has historically defaulted to ``limit=10`` and
@@ -478,7 +493,7 @@ class ErasureCoordinator:
                         "detail": "memory items carry no 'memory_id'",
                     }
 
-                if self._vector_leg_disabled:
+                if skip_vector:
                     removed = self.memory.batch_delete(memory_ids, skip_vector=True)
                 else:
                     removed = self.memory.batch_delete(memory_ids)
@@ -589,6 +604,25 @@ def _memory_item_id(item: Any) -> Optional[str]:
         return None
     memory_id = item.get("memory_id") or item.get("id")
     return str(memory_id) if memory_id else None
+
+
+def _accepts_skip_vector(batch_delete: Any) -> bool:
+    """True when ``batch_delete`` takes a ``skip_vector`` keyword.
+
+    ``skip_vector`` is an ``AgentMemory``-specific extension, not part of the
+    duck-typed contract the class docstring promises (``find_by_entity`` and
+    ``batch_delete`` only). Passing it to an adapter that doesn't accept it
+    would raise ``TypeError`` and fail the whole memory leg, so this is
+    checked before ever passing the kwarg.
+    """
+    try:
+        signature = inspect.signature(batch_delete)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.name == "skip_vector" or parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+    return False
 
 
 #: Dict keys a backend uses to report whether a delete succeeded, and the

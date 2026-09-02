@@ -719,6 +719,62 @@ class TestSeparateVectorStoreHandling(unittest.TestCase):
         self.assertEqual(receipt.stores["vectors"]["status"], STATUS_NOT_CONFIGURED)
         self.assertEqual(len(refusing_store.attempts), 0)  # delete_calls == 0
 
+    def test_skip_vector_deletion_does_not_orphan_local_vector_id_tracking(self):
+        """skip_vector=True must still pop the item's own _vector_ids entry.
+
+        Regression: delete_memory(skip_vector=True) used to leave the item's
+        entry in AgentMemory._vector_ids behind since the pop() lived inside
+        the `if not skip_vector` block alongside the actual vector-store
+        delete. That orphaned entry never got cleaned up and leaked into
+        to_dict()/from_dict() snapshots.
+        """
+        memory = _memory_with_embedding("customer-4471", _SelectiveDeleteStore())
+        memory_id = next(iter(memory.memory_items))
+        self.assertIn(memory_id, memory._vector_ids)
+
+        ErasureCoordinator(memory=memory, vector_store=False).erase_entity(
+            "customer-4471"
+        )
+
+        self.assertNotIn(memory_id, memory.memory_items)
+        self.assertNotIn(memory_id, memory._vector_ids)
+
+    def test_memory_adapter_without_skip_vector_support_is_not_broken(self):
+        """A duck-typed memory whose batch_delete() lacks skip_vector must still work.
+
+        The class docstring only requires find_by_entity and batch_delete; an
+        adapter is not obligated to support skip_vector. The coordinator must
+        detect that and fall back to the plain call rather than raising
+        TypeError and failing the whole memory leg.
+        """
+
+        class _PlainAdapter:
+            def __init__(self):
+                self.items = {"m1": {"memory_id": "m1", "entities": [{"id": "customer-4471"}]}}
+
+            def find_by_entity(self, entity_id, limit=None):
+                return [
+                    item
+                    for item in self.items.values()
+                    if any(e.get("id") == entity_id for e in item.get("entities", []))
+                ]
+
+            def batch_delete(self, memory_ids):
+                removed = 0
+                for memory_id in memory_ids:
+                    if self.items.pop(memory_id, None) is not None:
+                        removed += 1
+                return removed
+
+        adapter = _PlainAdapter()
+
+        receipt = ErasureCoordinator(
+            memory=adapter, vector_store=False
+        ).erase_entity("customer-4471")
+
+        self.assertEqual(receipt.stores["memory"]["status"], STATUS_ERASED)
+        self.assertEqual(adapter.items, {})
+
     def test_separate_vector_store_only_handles_coordinator_store(self):
         """When coordinator has a different vector_store, it only handles that one.
 

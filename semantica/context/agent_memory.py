@@ -588,16 +588,15 @@ class AgentMemory:
             return False
 
         # Remove from vector store unless a caller is staging an atomic local update.
-        if not skip_vector:
-            if self.vector_store:
-                try:
-                    vector_ids = list(self._vector_ids.get(memory_id, [])) or [
-                        memory_id
-                    ]
-                    self._delete_vector_ids(vector_ids)
-                except Exception as e:
-                    self.logger.warning(f"Failed to delete from vector store: {e}")
-            self._vector_ids.pop(memory_id, None)
+        if not skip_vector and self.vector_store:
+            try:
+                vector_ids = list(self._vector_ids.get(memory_id, [])) or [memory_id]
+                self._delete_vector_ids(vector_ids)
+            except Exception as e:
+                self.logger.warning(f"Failed to delete from vector store: {e}")
+        # Bookkeeping runs unconditionally: a skip_vector delete still removes the
+        # item, so leaving its tracked ids behind would orphan them permanently.
+        self._vector_ids.pop(memory_id, None)
 
         memory_item = self.memory_items[memory_id]
 
